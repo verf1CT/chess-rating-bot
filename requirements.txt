@@ -1,4 +1,3 @@
-aiogram
-requests
-beautifulsoup4
+aiogram==2.25.1
 apscheduler
+requests

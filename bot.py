@@ -1,93 +1,69 @@
+import os
 import asyncio
 import logging
 import requests
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import Message
-from aiogram.filters import Command
-from bs4 import BeautifulSoup
+from aiogram.utils import executor
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-import os
 
-# Загружаем токен из переменных окружения (удобно для Railway)
-TOKEN = os.getenv("TOKEN")
+# Включаем логирование
+logging.basicConfig(level=logging.INFO)
 
-# Проверка, есть ли токен
-if not TOKEN:
-    raise ValueError("Не задан токен бота! Укажите его в переменных окружения.")
+# Загружаем переменные окружения
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # Токен бота
+CHESS_PLAYER_ID = os.getenv("CHESS_PLAYER_ID")  # ID игрока на ruchess
+CHAT_ID = os.getenv("CHAT_ID")  # ID чата или пользователя, куда отправлять уведомления
 
-# Запускаем бота
-bot = Bot(token=TOKEN)
-dp = Dispatcher()
+# Создаем бота и диспетчер
+bot = Bot(token=TELEGRAM_BOT_TOKEN)
+dp = Dispatcher(bot)
 
-# Словарь отслеживаемых пользователей {telegram_id: {"id": chess_id, "rating": rating}}
-user_ratings = {}
-
-# Функция для получения рейтинга шахматиста
+# Функция для получения рейтинга с ruchess
 def get_chess_rating(player_id):
-    url = f"https://ratings.ruchess.ru/people/{player_id}"
-    response = requests.get(url)
-    if response.status_code != 200:
-        return None
-
-    soup = BeautifulSoup(response.text, "html.parser")
-    rating_tag = soup.find("span", class_="profile__rating-value")
-    if rating_tag:
-        return int(rating_tag.text.strip())  # Преобразуем в число
+    url = f"https://ratings.ruchess.ru/api/players/{player_id}"
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()
+        if "player" in data and "ratings" in data["player"]:
+            ratings = data["player"]["ratings"]
+            return ratings  # Возвращаем все рейтинги
+    except Exception as e:
+        logging.error(f"Ошибка при получении рейтинга: {e}")
     return None
 
-# Команда /start
-@dp.message(Command("start"))
-async def start(message: Message):
-    await message.answer(
-        "Привет! Я бот, который следит за изменением рейтинга шахматистов.\n\n"
-        "Чтобы начать отслеживание, отправь команду:\n"
-        "`/track <ID>` (например: `/track 12345`)"
-    )
+# Глобальная переменная для хранения последнего рейтинга
+last_rating = None
 
-# Команда /track <ID>
-@dp.message(Command("track"))
-async def track(message: Message):
-    args = message.text.split()
-    if len(args) < 2 or not args[1].isdigit():
-        await message.answer("Использование: `/track <ID>`\nНапример: `/track 12345`")
-        return
+# Функция для проверки обновлений рейтинга
+async def check_rating():
+    global last_rating
+    ratings = get_chess_rating(CHESS_PLAYER_ID)
+    
+    if ratings:
+        new_rating = ratings[0]["value"]  # Берем первый рейтинг (например, классический)
+        if last_rating is not None and new_rating != last_rating:
+            message = f"♟ Рейтинг изменился! Новый рейтинг: {new_rating}"
+            await bot.send_message(CHAT_ID, message)
+        last_rating = new_rating
 
-    chess_id = args[1]
-    rating = get_chess_rating(chess_id)
-
-    if rating is None:
-        await message.answer("Ошибка: не удалось получить рейтинг. Проверь ID шахматиста.")
-        return
-
-    user_ratings[message.from_user.id] = {"id": chess_id, "rating": rating}
-    await message.answer(f"✅ Теперь я отслеживаю рейтинг игрока с ID {chess_id}.\nТекущий рейтинг: {rating}.")
-
-# Команда /untrack (удаление отслеживания)
-@dp.message(Command("untrack"))
-async def untrack(message: Message):
-    if message.from_user.id in user_ratings:
-        del user_ratings[message.from_user.id]
-        await message.answer("❌ Я больше не отслеживаю рейтинг шахматиста.")
-    else:
-        await message.answer("Ты еще не добавлял шахматиста для отслеживания.")
-
-# Функция проверки рейтинга по расписанию
-async def check_ratings():
-    for user_id, data in user_ratings.items():
-        new_rating = get_chess_rating(data["id"])
-        if new_rating is not None and new_rating != data["rating"]:
-            await bot.send_message(user_id, f"♟ Рейтинг шахматиста с ID {data['id']} изменился: {data['rating']} ➝ {new_rating}")
-            user_ratings[user_id]["rating"] = new_rating  # Обновляем рейтинг
-
-# Запуск планировщика (каждые 10 минут)
+# Запуск планировщика
 scheduler = AsyncIOScheduler()
-scheduler.add_job(check_ratings, "interval", minutes=10)
-scheduler.start()
+
+async def start_scheduler():
+    scheduler.add_job(check_rating, "interval", minutes=5)  # Проверка каждые 5 минут
+    scheduler.start()
+
+# Обработчик команды /start
+@dp.message_handler(commands=["start"])
+async def start(message: types.Message):
+    await message.reply("Привет! Я буду уведомлять об изменении рейтинга на ruchess.ru.")
+
+# Главная функция
+async def main():
+    await start_scheduler()
+    await dp.start_polling()
 
 # Запуск бота
-async def main():
-    logging.basicConfig(level=logging.INFO)
-    await dp.start_polling(bot)
-
 if __name__ == "__main__":
     asyncio.run(main())
